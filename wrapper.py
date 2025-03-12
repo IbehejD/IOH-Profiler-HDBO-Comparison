@@ -901,6 +901,160 @@ class BO_botorchWrapper:
             self.Y = torch.cat([self.Y, new_y])
 
 
+
+
+
+
+class BAxUS_botorchWrapper:
+    def __init__(self, func, dim, ub, lb, total_budget, DoE_size, random_seed):
+        import pathlib
+        import sys
+      
+        my_dir = pathlib.Path(__file__).parent.resolve()
+        sys.path.append(os.path.join(my_dir, 'mylib', 'lib_BAxUS'))
+        self.func = func
+        self.dim = dim
+        self.ub = ub
+        self.lb = lb
+        self.total_budget = total_budget
+        self.Doe_size = DoE_size
+        self.random_seed = random_seed
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.dtype = torch.double
+    def _bbob_emb(self, x):
+        """ Adatta una funzione BBOB: 
+            - Scala l'input da [-1,1] a [-5,5]
+            - Negativizza per minimizzazione
+        """
+        x_scaled = self.lb + (self.ub - self.lb) * (x + 1) / 2  # Porta x da [-1,1] a [-5,5]
+        return -self.func(x_scaled.tolist())  # Minimizzazione    
+    
+    def run(self):
+        import torch
+        import botorch
+        import math
+        import os
+        from dataclasses import dataclass
+
+        import gpytorch
+        import matplotlib.pyplot as plt
+        from gpytorch.constraints import Interval
+        from gpytorch.kernels import MaternKernel, ScaleKernel
+        from gpytorch.likelihoods import GaussianLikelihood
+        from gpytorch.mlls import ExactMarginalLogLikelihood
+        from torch.quasirandom import SobolEngine
+
+        from botorch.acquisition.analytic import LogExpectedImprovement
+        from botorch.exceptions import ModelFittingError
+        from botorch.fit import fit_gpytorch_mll
+        from botorch.generation import MaxPosteriorSampling
+        from botorch.models import SingleTaskGP
+        from botorch.optim import optimize_acqf
+        from botorch.test_functions import Branin
+
+        from BAxUS import ( # Importa tutte le funzioni necessarie da utils.py
+            branin_emb,
+            BaxusState,
+            branin_emb,
+            embedding_matrix,
+            increase_embedding_and_observations,
+            get_initial_points,
+            create_candidate,
+            update_state,
+        )
+
+        dim = self.dim
+
+        n_init = self.Doe_size
+        max_cholesky_size = float("inf")  # Always use Cholesky
+        EVALUATION_BUDGET = self.total_budget
+        NUM_RESTARTS = 10
+        RAW_SAMPLES = 512
+        N_CANDIDATES = min(5000, max(2000, 200 * dim))
+
+        state = BaxusState(dim=dim, eval_budget=EVALUATION_BUDGET - n_init)
+        S = embedding_matrix(input_dim=state.dim, target_dim=state.d_init)
+
+        X_baxus_target = get_initial_points(state.d_init, n_init)
+        X_baxus_input = X_baxus_target @ S
+        Y_baxus = torch.tensor(
+            [self._bbob_emb(x) for x in X_baxus_input], dtype=self.dtype, device=self.device
+        ).unsqueeze(-1)
+
+        # Disable input scaling checks as we normalize to [-1, 1]
+        with botorch.settings.validate_input_scaling(False):
+            for _ in range(EVALUATION_BUDGET - n_init):  # Run until evaluation budget depleted
+                # Fit a GP model
+                train_Y = (Y_baxus - Y_baxus.mean()) / Y_baxus.std()
+                likelihood = GaussianLikelihood(noise_constraint=Interval(1e-8, 1e-3))
+                model = SingleTaskGP(
+                    X_baxus_target, train_Y, likelihood=likelihood
+                )
+                mll = ExactMarginalLogLikelihood(model.likelihood, model)
+
+                # Do the fitting and acquisition function optimization inside the Cholesky context
+                with gpytorch.settings.max_cholesky_size(max_cholesky_size):
+                    # Fit the model
+                    try:
+                        fit_gpytorch_mll(mll)
+                    except ModelFittingError:
+                        # Right after increasing the target dimensionality, the covariance matrix becomes indefinite
+                        # In this case, the Cholesky decomposition might fail due to numerical instabilities
+                        # In this case, we revert to Adam-based optimization
+                        optimizer = torch.optim.Adam([{"params": model.parameters()}], lr=0.1)
+
+                        for _ in range(100):
+                            optimizer.zero_grad()
+                            output = model(X_baxus_target)
+                            loss = -mll(output, train_Y.flatten())
+                            loss.backward()
+                            optimizer.step()
+
+                    # Create a batch
+                    X_next_target = create_candidate(
+                        state=state,
+                        model=model,
+                        X=X_baxus_target,
+                        Y=train_Y,
+                        n_candidates=N_CANDIDATES,
+                        num_restarts=NUM_RESTARTS,
+                        raw_samples=RAW_SAMPLES,
+                        acqf="ts",
+                    )
+
+                X_next_input = X_next_target @ S
+
+                Y_next = torch.tensor(
+                    [self._bbob_emb(x) for x in X_next_input], dtype=self.dtype, device=self.device
+                ).unsqueeze(-1)
+
+                # Update state
+                state = update_state(state=state, Y_next=Y_next)
+
+                # Append data
+                X_baxus_input = torch.cat((X_baxus_input, X_next_input), dim=0)
+                X_baxus_target = torch.cat((X_baxus_target, X_next_target), dim=0)
+                Y_baxus = torch.cat((Y_baxus, Y_next), dim=0)
+
+                # Print current status
+                print(
+                    f"iteration {len(X_baxus_input)}, d={len(X_baxus_target.T)})  Best value: {state.best_value:.3}, TR length: {state.length:.3}"
+                )
+
+                if state.restart_triggered:
+                    state.restart_triggered = False
+                    print("increasing target space")
+                    S, X_baxus_target = increase_embedding_and_observations(
+                        S, X_baxus_target, state.new_bins_on_split
+                    )
+                    print(f"new dimensionality: {len(S)}")
+                    state.target_dim = len(S)
+                    state.length = state.length_init
+                    state.failure_counter = 0
+                    state.success_counter = 0
+
+
+
 def wrapopt(optimizer_name, func, ml_dim, ml_total_budget, ml_DoE_size, random_seed):
     ub = +5
     lb = -5
@@ -953,6 +1107,10 @@ def wrapopt(optimizer_name, func, ml_dim, ml_total_budget, ml_DoE_size, random_s
     if optimizer_name == 'BO_botorch':
         return BO_botorchWrapper(func=func, dim=ml_dim, ub=ub, lb=lb, total_budget=ml_total_budget, DoE_size=ml_DoE_size,
                              random_seed=random_seed)
+    if optimizer_name == 'BAxUS_botorch':
+        return BAxUS_botorchWrapper(func=func, dim=ml_dim, ub=ub, lb=lb, total_budget=ml_total_budget, DoE_size=ml_DoE_size,
+                             random_seed=random_seed)
+
 
 if __name__ == "__main__":
     dim = 10
@@ -960,7 +1118,7 @@ if __name__ == "__main__":
     doe_size = dim
     seed = 2
     # Algorithm alternatives:
-    algorithm_name = "turbo1"
+    algorithm_name = "BAxUS_botorch"
     f = get_problem(1, dimension=dim, instance=1, problem_type='Real')
 
     opt = wrapopt(algorithm_name, f, dim, total_budget, doe_size, seed)
