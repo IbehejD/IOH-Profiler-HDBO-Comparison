@@ -4,25 +4,52 @@ import json
 import datetime
 import subprocess
 
+
 class ExperimentEnvironment:
-    SLURM_SCRIPT_TEMPLATE = '''#!/bin/bash
+    SLURM_SCRIPT_TEMPLATE = '''
+#!/bin/bash
+# Nastavení pro MetaCentrum
+# Požadavky na zdroje
+#PBS -l walltime=04:00:00
+#PBS -l select=1:ncpus=8:mem=128gb:scratch_local=80gb
+#PBS -N BO_experiment_##from_number##_##fromplus##
 
-#SBATCH --job-name=##folder##
-#SBATCH --array=0-##jobs_count##
-#SBATCH --clusters=serial
-#SBATCH --partition=serial_std
-#SBATCH --mem=2048MB
-#SBATCH --time=96:00:00
-#SBATCH --mail-user=your_email@domain.com
-#SBATCH --mail-type=END,FAIL
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=4
-#SBATCH --output=##logs_out##
-#SBATCH --error=##logs_err##
+# run multiple MATLAB instances in parallel
+module add -s parallel 
 
-num=##from_number##
-FILE_ID=$((${SLURM_ARRAY_TASK_ID}+$num))
-python ../run_experiment.py configs/*${FILE_ID}.json
+echo "SCRATCH"
+# Vytvoření scratch adresáře a kopírování dat
+cd $SCRATCHDIR
+mkdir tmp
+export TMPDIR=$SCRATCHDIR/tmp
+
+
+echo "DIR"
+
+for i in {0..7}; do
+  mkdir -p $SCRATCHDIR/run$i
+  rsync -a --exclude='results*' $PBS_O_WORKDIR/../../ ./run$i
+done
+
+echo "PARALLEL"
+
+parallel -j8 '
+  cd ./run{} \
+  && source ./.venv/bin/activate \
+  && f=$(({}+##from_number##)) \
+  && echo "configs/*-${f}.json" \
+  && python ./IOH-Profiler-HDBO-Comparison/run_experiment.py ./IOH-Profiler-HDBO-Comparison/run_11*/configs/*-${f}.json
+' ::: {0..7}
+
+echo "SYNC"
+
+for i in {0..7}; do
+  rsync -a $SCRATCHDIR/run$i/test* $PBS_O_WORKDIR/../../results/ 
+done
+
+echo "PURGE"
+
+rm -rf $SCRATCHDIR/*
 '''
 
     def __init__(self):
@@ -32,7 +59,7 @@ python ../run_experiment.py configs/*${FILE_ID}.json
         os.makedirs(folder_name, exist_ok=False)
         print(f'Experiment root is: {folder_name}')
         self.experiment_root = os.path.abspath(folder_name)
-        self.__max_array_size = 100
+        self.__max_array_size = 8
         self.__number_of_slurm_scripts = 0
 
     def set_up_by_experiment_config_file(self, experiment_config_file_name):
@@ -49,24 +76,26 @@ python ../run_experiment.py configs/*${FILE_ID}.json
         logs_out = os.path.join(self.logs_folder, '%A_%a.out')
         logs_err = os.path.join(self.logs_folder, '%A_%a.err')
         script = ExperimentEnvironment.SLURM_SCRIPT_TEMPLATE
-        script = script\
-                .replace('##folder##', self.result_folder_prefix)\
-                .replace('##logs_out##', logs_out)\
-                .replace('##logs_err##', logs_err)
+        # script = script\
+        #         .replace('##folder##', self.result_folder_prefix)\
+        #         .replace('##logs_out##', logs_out)\
+        #         .replace('##logs_err##', logs_err)
         offset = 0
         for i in range(self.generated_configs // self.__max_array_size):
             with open(os.path.join(self.experiment_root, f'slurm{self.__number_of_slurm_scripts}.sh'), 'w') as f:
-                f.write(script\
-                        .replace('##from_number##', str(offset))\
-                        .replace('##jobs_count##', str(self.__max_array_size - 1)))
+                f.write(script
+                        .replace('##from_number##', str(offset)).replace('##fromplus##',str(offset+7))\
+                        # .replace('##jobs_count##', str(self.__max_array_size - 1))
+                        )
             offset += self.__max_array_size
             self.__number_of_slurm_scripts += 1
         r = self.generated_configs % self.__max_array_size
         if r > 0:
             with open(os.path.join(self.experiment_root, f'slurm{self.__number_of_slurm_scripts}.sh'), 'w') as f:
-                f.write(script\
-                        .replace('##from_number##', str(offset))\
-                        .replace('##jobs_count##', str(r - 1)))
+                f.write(script
+                        .replace('##from_number##', str(offset)).replace('##fromplus##',str(offset+7))\
+                        # .replace('##jobs_count##', str(r - 1))
+                        )
             offset += r
             self.__number_of_slurm_scripts += 1
 
@@ -82,7 +111,8 @@ python ../run_experiment.py configs/*${FILE_ID}.json
             config['extra'] = ''
         optimizers = config['optimizers']
         lb, ub = config['lb'], config['ub']
-        runs_number = len(optimizers) * len(fids) * len(iids) * len(dims) * reps
+        runs_number = len(optimizers) * len(fids) * \
+            len(iids) * len(dims) * reps
         cur_config_number = 0
         configs_dir = os.path.join(self.experiment_root, 'configs')
         os.makedirs(configs_dir, exist_ok=False)
@@ -95,31 +125,34 @@ python ../run_experiment.py configs/*${FILE_ID}.json
                         # print(f'Ids for opt={my_optimizer_name}, fid={fid}, iid={iid}, dim={dim} are [{cur_config_number}, {cur_config_number+reps-1}]')
                         for rep in range(reps):
                             experiment_config = {
-                                    'folder': f'{self.result_folder_prefix}_Opt-{my_optimizer_name}_F-{fid}_Id-{iid}_Dim-{dim}_Rep-{rep}_NumExp-{cur_config_number}',
-                                    'opt': my_optimizer_name,
-                                    'fid': fid,
-                                    'iid': iid,
-                                    'dim': dim,
-                                    'seed': rep,
-                                    'lb': lb,
-                                    'ub': ub,
-                                    }
+                                'folder': f'{self.result_folder_prefix}_Opt-{my_optimizer_name}_F-{fid}_Id-{iid}_Dim-{dim}_Rep-{rep}_NumExp-{cur_config_number}',
+                                'opt': my_optimizer_name,
+                                'fid': fid,
+                                'iid': iid,
+                                'dim': dim,
+                                'seed': rep,
+                                'lb': lb,
+                                'ub': ub,
+                            }
                             cur_config_file_name = f'Opt-{my_optimizer_name}_F-{fid}_Id-{iid}_Dim-{dim}_Rep-{rep}_NumExp-{cur_config_number}.json'
                             with open(os.path.join(configs_dir, cur_config_file_name), 'w') as f:
                                 json.dump(experiment_config, f)
                             cur_config_number += 1
         print(f'Generated {cur_config_number} files')
         self.generated_configs = cur_config_number
+
     def is_slurm_available(self):
         try:
-            subprocess.run(["sbatch", "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["sbatch", "--version"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return True
         except FileNotFoundError:
             return False
 
     def print_helper(self):
         if self.is_slurm_available():
-            print(f'cd {self.experiment_root} && for (( i=0; i<{self.__number_of_slurm_scripts}; ++i )); do sbatch slurm$i.sh; done')
+            print(
+                f'cd {self.experiment_root} && for (( i=0; i<{self.__number_of_slurm_scripts}; ++i )); do sbatch slurm$i.sh; done')
 
 
 def main(argv):

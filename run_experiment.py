@@ -40,7 +40,8 @@ class AlgorithmWrapper:
         self.optimizer_name = optimizer_name
         func = partial(AlgorithmWrapper.__fitness_function_wrapper, f=f)
         doe_size = decide_doe_size(self.dim)
-        total_budget = decide_total_budget(self.dim, doe_size)
+        # total_budget = decide_total_budget(self.dim, doe_size)
+        total_budget = min(100*dim,1000)
         self.opt = wrapopt(
             optimizer_name, func, self.dim, total_budget, doe_size, self.seed)
         self.opt.run()
@@ -86,7 +87,7 @@ def run_particular_experiment(my_optimizer_name, fid, iid, dim, rep, folder_name
     sys.stdout.flush()
    # l.watch(algorithm, [])
     l.watch(algorithm, ['acq_opt_time', 'model_fit_time', 'cum_iteration_time'])
-    p = MyObjectiveFunctionWrapper(fid, iid, dim)
+    p = MyObjectiveFunctionWrapper(fid, iid, dim,directed_by='RP')
     p.attach_logger(l)
     print("dim = ", dim)
     algorithm(my_optimizer_name, p, fid, iid, dim)

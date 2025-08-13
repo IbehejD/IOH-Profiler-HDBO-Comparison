@@ -858,7 +858,7 @@ import os
 import sys
 from botorch.models import SingleTaskGP
 from botorch.fit import fit_gpytorch_mll
-from botorch.acquisition import LogExpectedImprovement
+from botorch.acquisition.analytic import LogExpectedImprovement
 from botorch.optim.optimize import optimize_acqf
 from botorch.sampling import SobolQMCNormalSampler
 from gpytorch.mlls import ExactMarginalLogLikelihood

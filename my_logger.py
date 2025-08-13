@@ -1,6 +1,11 @@
 import os
 import time
-from ioh import get_problem, ProblemClass
+import sys
+from ioh import get_problem, ProblemClass, wrap_problem
+from pathlib import Path
+parent_dir = Path(__file__).resolve().parent.parent
+sys.path.append(str(parent_dir))
+from Practical_Problems.Practical_Problems_Suite import get_practical_problem
 
 
 class MyIOHFormatOnEveryEvaluationLogger:
@@ -65,6 +70,7 @@ class MyObjectiveFunctionWrapper:
         self.iid = iid
         self.dim = dim
         self.my_loggers = []
+        self.unknown = False
         if directed_by == 'Hao':
             self.my_function, self.optimum = bn.instantiate(ifun=fid, iinstance=iid)
             iohf = get_problem(fid, dimension=dim, instance=iid, problem_class = ProblemClass.REAL)
@@ -73,6 +79,12 @@ class MyObjectiveFunctionWrapper:
             self.my_function = get_problem(fid, dimension=dim, instance=iid, problem_class = ProblemClass.REAL)
             self.func_name = self.my_function.meta_data.name
             self.optimum = self.my_function.optimum.y
+        elif directed_by == 'RP':
+            print("directed by RP")
+            self.my_function  =  get_practical_problem(fid,dim=dim)
+            self.func_name = self.my_function
+            # self.optimum = self.my_function.optimum
+            self.unknown = True
         else:
             raise ValueError('Unknown way to create function using', directed_by)
         self.cnt_eval = 0
@@ -93,14 +105,18 @@ class MyObjectiveFunctionWrapper:
     def __call__(self, x):
          cur_value = self.my_function(x)
          distance = cur_value
-         optimumy = self.optimum
-         loss = (cur_value - optimumy) 
          self.best_so_far = min(self.best_so_far, cur_value)
          self.min_distance = min(self.min_distance, distance)
-         self.best_loss = min(self.best_loss,loss) 
+         if not(self.unknown):
+            optimumy = self.optimum
+            loss = (cur_value - optimumy) 
+            self.best_loss = min(self.best_loss,loss) 
          self.cnt_eval += 1
          for l in self.my_loggers:
-             l.log(self.cnt_eval, distance, self.min_distance, loss, self.best_loss)
+             if not(self.unknown):
+                l.log(self.cnt_eval, distance, self.min_distance, loss, self.best_loss)
+             else:
+                l.log(self.cnt_eval, distance, self.min_distance, 0, 0)
          return cur_value
    
     def attach_logger(self, logger):
