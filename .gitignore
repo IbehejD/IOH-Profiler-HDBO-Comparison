@@ -129,3 +129,5 @@ dmypy.json
 .pyre/
 
 mylib/lib_BO_bayesoptim/Bayesian-Optimization/
+
+run_*
